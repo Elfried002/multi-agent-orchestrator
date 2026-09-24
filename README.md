@@ -301,8 +301,8 @@ sudo bash deploy/setup.sh --domain orchestrateur.interne --no-https --yes
 
 ### Installation vérifiée sur l'environnement cible
 
-Le script a été exécuté pour de vrai sur une **Ubuntu 24.04 vierge** (conteneur
-systemd via Docker) et contrôlé en 86 points, tous verts : code de sortie 0, Node.js
+Le script a été exécuté pour de vrai sur des **Ubuntu 24.04 et 22.04 vierges**
+(conteneur systemd via Docker) et contrôlé en 86 points sur chacune, tous verts : code de sortie 0, Node.js
 20+ installé par le script, `esbuild` de Vite opérationnel (le blocage par défaut des
 scripts d'installation de npm 11 est traité), frontend compilé et servi par Nginx,
 service systemd actif et activé au démarrage, base et compte administrateur créés,
@@ -564,9 +564,9 @@ contre un vrai serveur, **tâche réellement exécutée par le runtime Hermes et
 enregistré**, scripts de déploiement couverts par leurs propres tests.
 
 **Installation vérifiée sur l'environnement cible** : `deploy/setup.sh` a été exécuté
-sur une **Ubuntu 24.04 vierge** (conteneur systemd, banc d'essai
+sur des **Ubuntu 24.04 et 22.04 vierges** (conteneur systemd, banc d'essai
 `deploy/tests/test-ubuntu-container.sh`) et un contrôle en **86 points** passe sans
-échec : le script installe Node.js 20+, compile le frontend React, crée le service
+échec sur les deux versions : le script installe Node.js 20+, compile le frontend React, crée le service
 systemd, configure Nginx et laisse l'orchestrateur opérationnel (`/health` 200,
 interface servie, compte administrateur créé, `update.sh` fonctionnel).
 

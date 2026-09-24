@@ -382,13 +382,14 @@ l'environnement réellement testé (FastAPI 0.141.1, SQLAlchemy 2.0.54, Pydantic
 | Connecteur agent (vrai serveur HTTP) | **10/10** contrôles, tâche hostile non exécutée |
 | Exécution d'une tâche **par Hermes** | **10/10**, tâche `COMPLETED`, résultat `moteur: hermes-cli` |
 | Installation Ubuntu 24.04 vierge (conteneur, banc réel) | **86/86** contrôles, `setup.sh` exit 0 |
+| Installation Ubuntu 22.04 vierge (même banc) | **86/86** contrôles, `setup.sh` exit 0 |
 | Recette Docker complète | **13/13** contrôles |
 | Tests des scripts de déploiement | **47/47** et **18/18** assertions |
 | Persistance après redémarrage | vérifiée par deux cycles de vie successifs |
 | Intégration continue | 7 travaux, dont `nginx -t` et `systemd-analyze verify` |
 
-Le banc d'installation (§C) établit, sur une **Ubuntu 24.04 vierge** et non par
-relecture : `setup.sh` se termine avec le **code 0** ; il installe **Node.js 20+ via
+Le banc d'installation (§C) établit, sur des **Ubuntu 24.04 et 22.04 vierges** (les deux
+LTS déclarées prises en charge par le script) et non par relecture : `setup.sh` se termine avec le **code 0** ; il installe **Node.js 20+ via
 NodeSource**, npm et le frontend React qu'il **compile** et fait servir par Nginx
 (page d'accueil 200) ; il crée le service systemd durci, **actif et activé au
 démarrage** ; `GET /health` répond 200 en direct et à travers le reverse proxy ; les

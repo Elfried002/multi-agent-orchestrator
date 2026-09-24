@@ -2,13 +2,14 @@
 # =============================================================================
 #  Multi-Agent Orchestrator — deploy/tests/test-ubuntu-container.sh
 #
-#  Banc d'essai REPRODUCTIBLE de « deploy/setup.sh » sur un Ubuntu 24.04 VIERGE
+#  Banc d'essai REPRODUCTIBLE de « deploy/setup.sh » sur un Ubuntu LTS VIERGE
+#  (ubuntu:24.04 par défaut, autre version via MAO_TEST_IMAGE_BASE)
 #  (conteneur Docker exécutant systemd). Il répond à une seule question :
 #  après exécution du script officiel sur un système où rien n'est installé,
 #  l'orchestrateur est-il réellement opérationnel ?
 #
 #  Ce que fait le banc d'essai :
-#    1. construit une image Ubuntu 24.04 contenant seulement systemd : ni
+#    1. construit une image Ubuntu LTS (24.04 par défaut) contenant seulement systemd : ni
 #       python3, ni curl, ni node/npm, ni nginx, ni certbot, ni sqlite3 — c'est
 #       l'étape 5 de setup.sh qui doit TOUT installer (démarrage à froid réel) ;
 #    2. démarre un conteneur avec systemd en PID 1 et y copie le projet en
@@ -50,6 +51,10 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 IMAGE_BASE="${MAO_TEST_IMAGE_BASE:-ubuntu:24.04}"
 IMAGE_TEST="${MAO_TEST_IMAGE:-mao-ubuntu-setup-test:24.04}"
 CONTAINER="${MAO_TEST_CONTAINER:-mao-setup-bench}"
+# Étiquette de version affichée (ubuntu:22.04 -> « 22.04 ») : le banc d'essai
+# peut être rejoué sur une autre version LTS via MAO_TEST_IMAGE_BASE.
+RELEASE="${IMAGE_BASE##*:}"
+[[ -n "$RELEASE" && "$RELEASE" != "$IMAGE_BASE" ]] || RELEASE="?"
 DOMAIN="${MAO_TEST_DOMAIN:-orchestrator.test}"
 ADMIN_USER="${MAO_TEST_ADMIN_USER:-admin}"
 PASSWORD_DELAY="${MAO_TEST_PASSWORD_DELAY:-45}"
@@ -86,7 +91,7 @@ die()        { printf '%s[ÉCHEC]%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Banc d'essai de deploy/setup.sh sur un Ubuntu 24.04 vierge (conteneur Docker).
+Banc d'essai de deploy/setup.sh sur un Ubuntu LTS VIERGE (conteneur Docker).
 
 Usage :
   bash deploy/tests/test-ubuntu-container.sh [options]
@@ -216,7 +221,7 @@ show_log_extract() { # <fichier> [nb lignes]
 #  1. Vérifications d'environnement hôte
 # ---------------------------------------------------------------------------
 preflight() {
-    log_step "Banc d'essai Ubuntu 24.04 — deploy/setup.sh de bout en bout"
+    log_step "Banc d'essai Ubuntu ${RELEASE} — deploy/setup.sh de bout en bout"
     log_info "Projet           : ${REPO_ROOT}"
     log_info "Domaine de test  : ${DOMAIN} (résolu vers 127.0.0.1 dans le conteneur)"
     log_info "Compte admin     : ${ADMIN_USER} (mot de passe généré, jamais affiché)"
@@ -242,10 +247,10 @@ preflight() {
 }
 
 # ---------------------------------------------------------------------------
-#  2. Image Ubuntu 24.04 + systemd (aucun outil applicatif préinstallé)
+#  2. Image Ubuntu LTS (24.04 par défaut) + systemd (aucun outil applicatif préinstallé)
 # ---------------------------------------------------------------------------
 build_image() {
-    log_step "Construction de l'image Ubuntu 24.04 (systemd uniquement)"
+    log_step "Construction de l'image Ubuntu ${RELEASE} (systemd uniquement)"
     local ctx build_ctx
     ctx="$(mktemp -d "${TMPDIR:-/tmp}/mao-img.XXXXXX")"
     cat > "${ctx}/Dockerfile" <<EOF
@@ -277,7 +282,7 @@ EOF
 #  3. Conteneur : systemd PID 1, domaine résolu localement
 # ---------------------------------------------------------------------------
 start_container() {
-    log_step "Démarrage du conteneur Ubuntu 24.04 vierge (systemd)"
+    log_step "Démarrage du conteneur Ubuntu ${RELEASE} vierge (systemd)"
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --name "$CONTAINER" \
         --privileged --cgroupns=host \
@@ -644,8 +649,8 @@ summary() {
     printf '  Contrôles échoués : %s\n' "$FAIL_COUNT"
     printf '  Journaux bruts    : %s\n' "$OUT_DIR"
     if (( FAIL_COUNT == 0 )); then
-        printf '\n  %sRÉSULTAT : OK — setup.sh rend l’orchestrateur pleinement opérationnel sur un Ubuntu 24.04 vierge.%s\n' \
-            "$C_GREEN" "$C_OFF"
+        printf '\n  %sRÉSULTAT : OK — setup.sh rend l’orchestrateur pleinement opérationnel sur un Ubuntu %s vierge.%s\n' \
+            "$C_GREEN" "$RELEASE" "$C_OFF"
         return 0
     fi
     printf '\n  %sRÉSULTAT : ÉCHEC%s — contrôles en échec :\n' "$C_RED" "$C_OFF"
@@ -666,7 +671,7 @@ main() {
     copy_project
 
     local rc=0
-    run_setup "$SETUP_LOG" "Étape 1 — exécution de setup.sh sur un Ubuntu 24.04 vierge…" || rc=$?
+    run_setup "$SETUP_LOG" "Étape 1 — exécution de setup.sh sur un Ubuntu ${RELEASE} vierge…" || rc=$?
     check_exit "setup.sh terminé sans erreur (code de sortie)" "$rc" "0"
 
     check_installation_layout
