@@ -62,6 +62,7 @@ RUN_TIMEOUT="${MAO_TEST_RUN_TIMEOUT:-3600}"
 KEEP=0
 RUN_UPDATE=1
 RUN_NPM11=1
+RUN_NODEPERM=1
 OUT_DIR=""
 
 APP_DIR="/opt/multi-agent-orchestrator/application"
@@ -104,6 +105,7 @@ Options :
   --keep             Conserver le conteneur et l'image à la fin.
   --no-update        Ne pas tester deploy/update.sh.
   --no-npm11         Ne pas tester la politique « allow-scripts » de npm 11.
+  --no-nodeperm      Ne pas rejouer le cas « npm préexistant non exécutable » (code 126).
   -h, --help         Afficher cette aide.
 
 Aucun secret n'est écrit dans un fichier : le mot de passe administrateur de test
@@ -121,6 +123,7 @@ parse_args() {
             --keep)        KEEP=1; shift ;;
             --no-update)   RUN_UPDATE=0; shift ;;
             --no-npm11)    RUN_NPM11=0; shift ;;
+            --no-nodeperm) RUN_NODEPERM=0; shift ;;
             -h|--help)     usage; exit 0 ;;
             *)             die "Option inconnue : $1 (voir --help)" ;;
         esac
@@ -642,7 +645,96 @@ phase_update() {
 }
 
 # ---------------------------------------------------------------------------
-#  9. Nettoyage et bilan
+#  9. Phase 4 : Node.js/npm PRÉEXISTANTS mais inaccessibles à l'utilisateur
+#     de service (cas réel : « bash: /usr/local/bin/npm: Permission denied »,
+#     code 126, à l'étape 6). Rejoué dans un conteneur NEUF : Node est installé
+#     dans /usr/local (archive officielle, comme sur le serveur concerné, où le
+#     shim /usr/local/bin/npm précède /usr/bin dans le PATH), puis ses droits
+#     sont restreints (0700). setup.sh doit détecter le défaut, réparer les
+#     permissions et terminer l'installation sans réinstaller Node.js.
+# ---------------------------------------------------------------------------
+phase_node_permissions() {
+    log_step "Phase 4 — Node.js/npm préexistants NON exécutables par l'utilisateur de service (cas « code 126 »)"
+
+    local main_container="$CONTAINER"
+    local c2="${CONTAINER}-nodperm"
+    local log2="${OUT_DIR}/setup-run-node-perm.log"
+    CONTAINER="$c2"
+
+    start_container
+    copy_project
+
+    local nodever=""
+    nodever="$(docker exec "$main_container" node --version 2>/dev/null || true)"
+    if [[ -z "$nodever" ]]; then
+        CONTAINER="$main_container"
+        ko_check "Node.js préexistant simulé (prérequis de la phase 4)" \
+            "version de Node illisible dans le conteneur certifié"
+        return 0
+    fi
+
+    log_info "Placement d'un Node.js ${nodever} préexistant dans /usr/local (archive officielle)…"
+    local out="" rc=0
+    out="$(docker exec "$c2" bash -c "
+        set -e
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq curl >/dev/null 2>&1
+        cd /tmp
+        curl -fsSL --retry 3 --max-time 300 'https://nodejs.org/dist/${nodever}/node-${nodever}-linux-x64.tar.gz' -o node.tar.gz
+        tar -xzf node.tar.gz -C /usr/local --strip-components=1
+        rm -f node.tar.gz
+        node --version" 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        CONTAINER="$main_container"
+        ko_check "Node.js préexistant simulé dans /usr/local" "$(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')"
+        return 0
+    fi
+    ok_check "Node.js préexistant simulé dans /usr/local" "$(printf '%s' "$out" | tail -n 1)"
+    docker exec "$c2" bash -c 'ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm'
+
+    # Droits restrictifs : le shim et l'arborescence npm ne sont plus lisibles ni
+    # exécutables par un utilisateur non privilégié (reproduction du défaut).
+    docker exec "$c2" bash -c \
+        'chmod 0700 /usr/local/bin/npm /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm/bin'
+    log_detail "$(docker exec "$c2" bash -c 'stat -c "%a %n" /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm/bin; ls -l /usr/local/bin/npm | cut -c1-90' | tr '\n' ' ')"
+
+    check_remote "défaut reproduit : npm refusé à un utilisateur non privilégié (code 126)" '^code=126$' \
+        bash -c 'runuser -u nobody -- /usr/local/bin/npm --version >/dev/null 2>&1; echo "code=$?"'
+
+    local rc2=0
+    run_setup "$log2" "Exécution de setup.sh avec Node.js/npm préexistants non exécutables…" || rc2=$?
+    check_exit "setup.sh termine malgré le Node.js préexistant mal permissionné" "$rc2" "0"
+    check_log "défaut détecté et expliqué dans le journal" \
+        "NON exécutables par un utilisateur non privilégié" "$log2"
+    check_log "permissions réparées automatiquement" "Permissions réparées" "$log2"
+    check_absent "aucune réinstallation inutile de Node.js (outils préexistants réutilisés)" \
+        "Téléchargement du script de dépôt NodeSource" "$log2"
+    check_absent "aucun repli NodeSource : la réparation des permissions a suffi" \
+        "Réparation insuffisante" "$log2"
+    check_absent "aucune erreur bloquante pendant l'installation" "Échec pendant" "$log2"
+
+    check_remote "npm exécutable par l'utilisateur de service après réparation" '^[0-9]+\.[0-9]+' \
+        bash -c 'runuser -u orchestrator -- env HOME=/var/lib/multi-agent-orchestrator /usr/local/bin/npm --version'
+    check_remote "node exécutable par l'utilisateur de service" '^v[0-9]+' \
+        bash -c 'runuser -u orchestrator -- env HOME=/var/lib/multi-agent-orchestrator /usr/local/bin/node --version'
+    check_remote "frontend réellement compilé avec ce Node préexistant (bundle JS présent)" '^[1-9][0-9]*$' \
+        bash -c "find ${APP_DIR}/frontend/dist/assets -name '*.js' | wc -l | tr -d ' '"
+    check_remote "service actif malgré le Node.js préexistant" '^active$' systemctl is-active orchestrator
+    check_remote "santé HTTP 200 malgré le Node.js préexistant" '^200$' \
+        curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/health
+    check_remote "frontend servi par Nginx malgré le Node.js préexistant" 'id="root"' \
+        curl -fsS --max-time 8 -H "Host: ${DOMAIN}" http://127.0.0.1/
+
+    CONTAINER="$main_container"
+    if (( ! KEEP )); then
+        docker rm -f "$c2" >/dev/null 2>&1 || true
+    else
+        log_info "Conteneur de la phase 4 conservé : docker exec -it ${c2} bash"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  10. Nettoyage et bilan
 # ---------------------------------------------------------------------------
 cleanup() {
     if (( KEEP )); then
@@ -702,6 +794,12 @@ main() {
         phase_update
     else
         log_step "Phase 3 — ignorée (--no-update)"
+    fi
+
+    if (( RUN_NODEPERM )); then
+        phase_node_permissions
+    else
+        log_step "Phase 4 — ignorée (--no-nodeperm)"
     fi
 
     cleanup

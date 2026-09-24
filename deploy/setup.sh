@@ -987,6 +987,77 @@ apt_install() { # $1... = paquets
     fi
 }
 
+# --- Node.js : exécutabilité par un utilisateur NON privilégié ----------------
+# Un Node.js préexistant (souvent dans /usr/local, posé par une archive officielle
+# ou un gestionnaire de version) est parfaitement détecté lorsque le script tourne
+# en root, mais le binaire npm peut être INEXÉCUTABLE par l'utilisateur de service :
+# shim en 0700, cible située dans un répertoire 0700, ou répertoire parent non
+# traversable. Or npm est lancé en tant qu'utilisateur de service (étape 6) : sans
+# ce contrôle, l'échec n'apparaît qu'à l'étape 6 sous la forme
+# « bash: /usr/local/bin/npm: Permission denied » (code 126).
+node_probe_user() { # utilisateur non privilégié servant de sonde
+    if [[ -n "${SERVICE_USER:-}" ]] && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+        printf '%s' "$SERVICE_USER"
+    elif id -u nobody >/dev/null 2>&1; then
+        printf '%s' 'nobody'
+    fi
+}
+
+node_tooling_usable_by() { # $1 = utilisateur ; succès si node ET npm s'exécutent réellement
+    local u="${1:-}" name="" bin=""
+    [[ -n "$u" ]] || return 0
+    have_cmd runuser || return 0
+    for name in node npm; do
+        bin="$(command -v "$name" 2>/dev/null || true)"
+        [[ -n "$bin" ]] || return 1
+        runuser -u "$u" -- env HOME=/tmp \
+            PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            "$bin" --version >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+repair_node_permissions() { # élargit la lecture/l'exécution pour tous (jamais l'inverse)
+    local name="" bin="" real="" dir="" tree="" changed=0
+    local bins=() targets=()
+    for name in node npm; do
+        bin="$(command -v "$name" 2>/dev/null || true)"
+        [[ -n "$bin" ]] || continue
+        bins+=("$bin")
+        real="$(readlink -f "$bin" 2>/dev/null || printf '%s' "$bin")"
+        targets+=("$real")
+    done
+    [[ ${#targets[@]} -gt 0 ]] || return 1
+
+    # 1. Shims (/usr/local/bin/npm, …) et cibles réelles : lecture + exécution.
+    chmod a+rx "${bins[@]}" "${targets[@]}" 2>/dev/null && changed=1
+
+    # 2. Chaîne des répertoires parents : traversée (bornée aux racines système).
+    for real in "${targets[@]}"; do
+        dir="$(dirname "$real")"
+        while [[ "$dir" != "/" && "$dir" != "/usr" && "$dir" != "/usr/local" \
+                 && "$dir" != "/opt" && "$dir" != "/etc" && "$dir" != "/var" ]]; do
+            chmod a+rX "$dir" 2>/dev/null && changed=1
+            dir="$(dirname "$dir")"
+        done
+    done
+
+    # 3. Arborescence des modules (npm lui-même, et binaires natifs tels qu'esbuild).
+    for real in "${targets[@]}"; do
+        tree=""
+        case "$real" in
+            */lib/node_modules/*) tree="${real%%/lib/node_modules/*}/lib/node_modules" ;;
+        esac
+        if [[ -n "$tree" && -d "$tree" ]]; then
+            chmod -R a+rX "$tree" 2>/dev/null && changed=1
+        fi
+    done
+
+    (( changed )) || return 1
+    log_info "Permissions élargies (lecture/exécution pour tous) : $(printf '%s ' "${targets[@]}")"
+    return 0
+}
+
 # --- Node.js 20+ : indispensable à la compilation du frontend ----------------
 # docs/INSTALLATION.md §5 (étape 5 : « installer uniquement les dépendances
 # nécessaires ») et §5 étape 6 (« installer et compiler le frontend »). Les
@@ -998,8 +1069,21 @@ ensure_nodejs() {
         current="$(node_major_version || true)"
     fi
     if [[ -n "$current" ]] && (( current >= MIN_NODE_MAJOR )) && have_cmd npm; then
-        log_ok "Node.js $(node --version) et npm $(npm --version) déjà présents (>= ${MIN_NODE_MAJOR}) : aucune installation."
-        return 0
+        local probe="" probe_bin=""
+        probe="$(node_probe_user)"
+        probe_bin="$(command -v npm || true)"
+        if node_tooling_usable_by "$probe"; then
+            log_ok "Node.js $(node --version) et npm $(npm --version) déjà présents (>= ${MIN_NODE_MAJOR}) : aucune installation."
+            return 0
+        fi
+        log_warn "Node.js/npm présents mais NON exécutables par un utilisateur non privilégié (« ${probe:-aucun} ») :"
+        log_warn "npm est lancé en tant qu'utilisateur de service — cause : ${probe_bin} (shim en 0700, cible dans un répertoire 0700, ou répertoire parent non traversable)."
+        log_info "Réparation des permissions (lecture/exécution pour tous)…"
+        if repair_node_permissions && node_tooling_usable_by "$probe"; then
+            log_ok "Permissions réparées : npm est exécutable par l'utilisateur de service."
+            return 0
+        fi
+        log_warn "Réparation insuffisante : installation de Node.js ${MIN_NODE_MAJOR}+ depuis NodeSource (les outils préexistants ne sont pas supprimés)."
     fi
 
     if [[ -n "$current" ]]; then
@@ -1047,6 +1131,10 @@ ensure_nodejs() {
         die "Node.js v${current:-inconnu} installé : Node.js ${MIN_NODE_MAJOR}+ est requis (Vite). Vérifiez le dépôt NodeSource puis relancez."
     fi
     log_ok "Node.js $(node --version) et npm $(npm --version) installés (>= ${MIN_NODE_MAJOR})."
+    # Contrôle final : c'est l'utilisateur de service qui exécutera npm (étape 6).
+    if ! node_tooling_usable_by "$(node_probe_user)"; then
+        die "Node.js et npm sont installés mais restent inutilisables par un utilisateur non privilégié : vérifiez les permissions de $(command -v npm) (shim, cible et répertoires parents), puis relancez setup.sh."
+    fi
 }
 
 step5_install_dependencies() {
@@ -1260,11 +1348,29 @@ build_frontend() {
     fi
     prepare_npm_install_scripts
 
+    # --- Exécutabilité de npm par l'utilisateur de service --------------------
+    # npm est lancé en tant qu'utilisateur de service : un Node.js préexistant
+    # dont le shim (ou un répertoire parent) n'est pas lisible/exécutable par
+    # tous produit « Permission denied » (code 126) et interrompt l'étape 6.
+    if ! node_tooling_usable_by "$(node_probe_user)"; then
+        log_warn "npm n'est pas exécutable par l'utilisateur de service : réparation des permissions (lecture/exécution pour tous)."
+        if ! { repair_node_permissions && node_tooling_usable_by "$(node_probe_user)"; }; then
+            die "npm reste inutilisable par l'utilisateur de service : corrigez les permissions de $(command -v npm) (shim, cible et répertoires parents), puis relancez setup.sh."
+        fi
+        log_ok "Permissions de npm réparées avant la compilation du frontend."
+    fi
+
     # --- Dépendances : « npm ci » puis repli sur « npm install » --------------
     local out="" rc=0 installed=0
     if [[ -f "${FRONTEND_DIR}/package-lock.json" ]]; then
         log_info "Installation des dépendances frontend (npm ci, Node.js $(node --version))…"
         out="$(npm_frontend ci 2>&1)" || rc=$?
+        if (( rc == 126 )); then
+            log_warn "« npm ci » refusé par le système (code 126 : Permission denied) : réparation des permissions puis nouvelle tentative."
+            repair_node_permissions || true
+            rc=0
+            out="$(npm_frontend ci 2>&1)" || rc=$?
+        fi
         if (( rc == 0 )); then
             installed=1
         else
@@ -1276,8 +1382,17 @@ build_frontend() {
         log_info "Installation des dépendances frontend (npm install)…"
         rc=0
         out="$(npm_frontend install 2>&1)" || rc=$?
+        if (( rc == 126 )); then
+            log_warn "« npm install » refusé par le système (code 126 : Permission denied) : réparation des permissions puis nouvelle tentative."
+            repair_node_permissions || true
+            rc=0
+            out="$(npm_frontend install 2>&1)" || rc=$?
+        fi
         if (( rc != 0 )); then
             printf '%s\n' "$out" | tail -n 40 >&2
+            if (( rc == 126 )); then
+                die "npm est refusé par le système (code 126) : $(command -v npm) n'est pas exécutable par l'utilisateur ${SERVICE_USER}. Corrigez ses permissions (chmod a+rx sur le shim, sa cible et les répertoires parents), puis relancez setup.sh."
+            fi
             die "Échec de l'installation des dépendances frontend (code ${rc}, voir la sortie npm ci-dessus) : corrigez la cause puis relancez setup.sh."
         fi
     fi
