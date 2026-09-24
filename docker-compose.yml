@@ -1,0 +1,118 @@
+# =============================================================================
+#  Multi-Agent Orchestrator — recette locale avec Docker
+#
+#  Objectif : faire tourner l'orchestrateur complet (backend FastAPI + frontend
+#  React compilé + reverse proxy) sur un poste de développement ou de recette,
+#  sans installer Python ni Node sur la machine hôte.
+#
+#  Le déploiement de PRODUCTION n'utilise PAS ce fichier : il suit
+#  docs/INSTALLATION.md (Ubuntu Server, venv Python, Nginx, systemd, HTTPS,
+#  utilisateur de service non privilégié). Voir deploy/setup.sh.
+#
+#  Utilisation :
+#    export SECRET_KEY="$(python -c 'import secrets;print(secrets.token_urlsafe(64))')"
+#    export ADMIN_PASSWORD='un-mot-de-passe-solide'
+#    docker compose up -d --build
+#    # interface : http://127.0.0.1:8080   API : http://127.0.0.1:8000
+#
+#  Aucun secret n'est écrit dans ce fichier : SECRET_KEY et ADMIN_PASSWORD sont
+#  exigés depuis l'environnement (SECURITY.md §15).
+# =============================================================================
+
+name: multi-agent-orchestrator
+
+# --- Réseau dédié : adresses fixes pour que le backend ne fasse confiance
+#     qu'au proxy, et à lui seul (TRUSTED_PROXIES, SECURITY.md §8).
+networks:
+  orchestration:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.240.0/24
+
+volumes:
+  donnees:
+    driver: local
+
+services:
+
+  # --- Backend FastAPI + Uvicorn --------------------------------------------
+  backend:
+    image: multi-agent-orchestrator-backend:local
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      ORCHESTRATOR_ENV: ${ORCHESTRATOR_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ENABLE_DOCS: ${ENABLE_DOCS:-true}
+      # Données persistantes hors du code (ARCHITECTURE.md §12).
+      DATABASE_PATH: /data/orchestrator.db
+      LOG_DIR: /data/logs
+      # Exigé depuis l'environnement : aucun secret par défaut dans le dépôt.
+      SECRET_KEY: ${SECRET_KEY:?Definissez SECRET_KEY (python -c "import secrets;print(secrets.token_urlsafe(64))")}
+      ENROLLMENT_KEY: ${ENROLLMENT_KEY:-}
+      MONITOR_ENABLED: ${MONITOR_ENABLED:-true}
+      AGENT_RATE_LIMIT: ${AGENT_RATE_LIMIT:-300/minute}
+      ADMIN_RATE_LIMIT: ${ADMIN_RATE_LIMIT:-600/minute}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-5/minute}
+      MAX_RESULT_BYTES: ${MAX_RESULT_BYTES:-262144}
+      # 172.31.240.1 = passerelle Docker (accès direct), 172.31.240.3 = proxy.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1,172.31.240.1,172.31.240.3}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
+    volumes:
+      - donnees:/data
+    ports:
+      # Publié sur la boucle locale uniquement : à exposer via le proxy, pas en direct.
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    networks:
+      orchestration:
+        ipv4_address: 172.31.240.2
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --- Création du compte administrateur (une fois, idempotent) -------------
+  init:
+    image: multi-agent-orchestrator-backend:local
+    build:
+      context: ./backend
+    restart: "no"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Definissez SECRET_KEY}
+      DATABASE_PATH: /data/orchestrator.db
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Definissez ADMIN_PASSWORD}
+    volumes:
+      - donnees:/data
+    networks:
+      - orchestration
+    command:
+      - sh
+      - -c
+      - 'printf "%s\n" "$$ADMIN_PASSWORD" | python scripts/create_admin.py --username "$$ADMIN_USERNAME" --password-stdin --database /data/orchestrator.db'
+
+  # --- Frontend React compilé, servi par Nginx (proxy de l'API) -------------
+  web:
+    image: multi-agent-orchestrator-frontend:local
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    networks:
+      orchestration:
+        ipv4_address: 172.31.240.3

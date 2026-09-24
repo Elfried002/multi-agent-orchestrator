@@ -1,0 +1,78 @@
+# =============================================================================
+#  Multi-Agent Orchestrator — gabarit d'unité systemd
+#  Références : docs/INSTALLATION.md §7 et §11, docs/SECURITY.md §3.2 et §14,
+#               docs/ARCHITECTURE.md §12.
+#
+#  Rendu par « deploy/setup.sh » -> /etc/systemd/system/orchestrator.service
+#  puis : systemctl daemon-reload && systemctl enable --now orchestrator
+#
+#  Placeholders remplacés par setup.sh :
+#    __SERVICE_USER__   utilisateur système dédié non privilégié (orchestrator)
+#    __SERVICE_GROUP__  groupe système dédié (orchestrator)
+#    __BACKEND_DIR__    répertoire de travail (…/application/backend)
+#    __VENV_BIN__       binaire du venv (…/backend/.venv/bin)
+#    __ENV_FILE__       fichier d'environnement protégé (production.env)
+#    __DOCS_DIR__       documentation de référence (INSTALLATION.md)
+#    __DATA_DIR__       répertoire de données persistantes (base SQLite)
+#    __LOG_DIR__        répertoire de journaux applicatifs
+#
+#  Remarque : StartLimitBurst/StartLimitIntervalSec bornent les redémarrages
+#  afin qu'une panne de configuration reste visible au lieu de boucler.
+# =============================================================================
+
+[Unit]
+Description=Multi-Agent Orchestrator (backend FastAPI/Uvicorn)
+Documentation=file:__DOCS_DIR__/INSTALLATION.md
+After=network-online.target nginx.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__BACKEND_DIR__
+EnvironmentFile=__ENV_FILE__
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=__VENV_BIN__/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=20
+KillMode=mixed
+KillSignal=SIGTERM
+
+# --- Journalisation ----------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orchestrator
+
+# --- Durcissement (SECURITY.md §14 — le backend ne tourne jamais en root) ----
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__DATA_DIR__ __LOG_DIR__
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

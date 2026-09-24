@@ -1,0 +1,352 @@
+name: tests
+
+# Intégration continue du Multi-Agent Orchestrator.
+#   - syntaxe et analyse statique des scripts de déploiement (bash -n + shellcheck) ;
+#   - validation du gabarit Nginx rendu (structure + « nginx -t » réel) ;
+#   - validation de l'unité systemd (« systemd-analyze verify ») ;
+#   - test de préservation de la désinstallation (arborescence isolée) ;
+#   - tests backend (pytest) et compilation du frontend.
+#
+# Aucun secret n'est requis : les secrets de production ne sont jamais utilisés ici.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  CI_DOMAIN: "ci.example.com"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Scripts de déploiement : syntaxe et analyse statique
+  # ---------------------------------------------------------------------------
+  deploy-shell:
+    name: Scripts de déploiement (bash -n + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntaxe Bash de tous les scripts
+        run: |
+          set -euo pipefail
+          scripts=(
+            deploy/setup.sh
+            deploy/update.sh
+            deploy/uninstall.sh
+            deploy/tests/test-uninstall-preservation.sh
+            deploy/tests/test-setup-rollback.sh
+          )
+          for script in "${scripts[@]}"; do
+            [[ -f "$script" ]] || { echo "Fichier manquant : $script"; exit 1; }
+            bash -n "$script"
+            echo "bash -n OK : $script"
+          done
+
+      - name: Installation de shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: shellcheck (avertissements et erreurs)
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          shellcheck -S warning \
+            deploy/setup.sh \
+            deploy/update.sh \
+            deploy/uninstall.sh \
+            deploy/tests/test-uninstall-preservation.sh \
+            deploy/tests/test-setup-rollback.sh
+
+      - name: Contrôles de sécurité statiques des scripts
+        run: |
+          set -euo pipefail
+          # Aucun mot de passe ne doit être pré-renseigné ni accepté en option :
+          # un secret ne doit jamais apparaître dans les arguments d'un processus.
+          if grep -nE '^[[:space:]]*[A-Za-z_]*PASSWORD=[^"'"'"']' deploy/setup.sh; then
+            echo "Un mot de passe ne doit pas être pré-renseigné dans le script."; exit 1
+          fi
+          if grep -nE '\-\-password[)=]' deploy/setup.sh; then
+            echo "Le mot de passe ne doit pas être accepté en option de ligne de commande."; exit 1
+          fi
+          # La sortie du mot de passe se fait uniquement sur stdin du script backend.
+          grep -q -- '--password-stdin' deploy/setup.sh
+          # Aucune trace d'exécution ne doit pouvoir journaliser un secret.
+          if grep -nE '^[[:space:]]*set[[:space:]]+-x' deploy/*.sh; then
+            echo "set -x est interdit : il journaliserait les valeurs manipulées."; exit 1
+          fi
+          # L'écriture du fichier de configuration doit être restreinte (umask 077 / chmod 600).
+          grep -q 'umask 077' deploy/setup.sh
+          grep -q 'chmod 600' deploy/setup.sh
+          # Les scripts ne doivent jamais exécuter apt-get remove / purge.
+          if grep -nE '^[[:space:]]*(apt-get|apt)[[:space:]]+(remove|purge)' deploy/*.sh; then
+            echo "Une désinstallation de paquet système ne doit pas être automatisée."; exit 1
+          fi
+          echo "Contrôles statiques OK"
+
+  # ---------------------------------------------------------------------------
+  # 2. Gabarit Nginx : structure, puis configuration réelle validée par Nginx
+  # ---------------------------------------------------------------------------
+  nginx-config:
+    name: Configuration Nginx (rendu + nginx -t)
+    runs-on: ubuntu-latest
+    needs: deploy-shell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rendu du gabarit (aucune modification du système)
+        run: |
+          set -euo pipefail
+          bash deploy/setup.sh --render-only "$RUNNER_TEMP/render" --domain "$CI_DOMAIN"
+          ls -l "$RUNNER_TEMP/render" "$RUNNER_TEMP/render/no-tls"
+
+      - name: Validation structurelle (sans nginx)
+        run: |
+          set -euo pipefail
+          python3 deploy/tests/validate-nginx-config.py --mode tls --domain "$CI_DOMAIN" \
+            "$RUNNER_TEMP/render/nginx-site.conf"
+          python3 deploy/tests/validate-nginx-config.py --mode snippet \
+            "$RUNNER_TEMP/render/nginx-snippet.conf"
+          python3 deploy/tests/validate-nginx-config.py --mode http --domain "$CI_DOMAIN" \
+            "$RUNNER_TEMP/render/no-tls/nginx-site.conf"
+
+      - name: Préparation d'un certificat de test et des chemins attendus
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nginx openssl
+          sudo mkdir -p "/etc/letsencrypt/live/${CI_DOMAIN}" \
+                        /var/www/multi-agent-orchestrator/.well-known/acme-challenge \
+                        /opt/multi-agent-orchestrator/application/frontend/dist \
+                        /var/log/nginx
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "/etc/letsencrypt/live/${CI_DOMAIN}/privkey.pem" \
+            -out    "/etc/letsencrypt/live/${CI_DOMAIN}/fullchain.pem" \
+            -subj "/CN=${CI_DOMAIN}"
+          echo '<html><body><div id="root"></div></body></html>' \
+            | sudo tee /opt/multi-agent-orchestrator/application/frontend/dist/index.html >/dev/null
+
+      - name: Installation de la configuration rendue et nginx -t (variante TLS)
+        run: |
+          set -euo pipefail
+          sudo install -m 0644 "$RUNNER_TEMP/render/nginx-snippet.conf" \
+            "/etc/nginx/snippets/orchestrator-${CI_DOMAIN}.conf"
+          sudo install -m 0644 "$RUNNER_TEMP/render/nginx-site.conf" \
+            "/etc/nginx/sites-available/orchestrator-${CI_DOMAIN}"
+          sudo ln -sf "/etc/nginx/sites-available/orchestrator-${CI_DOMAIN}" \
+            "/etc/nginx/sites-enabled/orchestrator-${CI_DOMAIN}"
+          sudo nginx -t
+
+      - name: nginx -t (variante HTTP seul)
+        run: |
+          set -euo pipefail
+          sudo install -m 0644 "$RUNNER_TEMP/render/no-tls/nginx-site.conf" \
+            "/etc/nginx/sites-available/orchestrator-${CI_DOMAIN}"
+          sudo nginx -t
+
+      - name: Nginx démarre et sert la configuration (contrôle réel)
+        run: |
+          set -euo pipefail
+          sudo systemctl start nginx || sudo nginx
+          sleep 1
+          # Le challenge ACME doit rester joignable en HTTP.
+          echo "jeton-de-test" | sudo tee \
+            /var/www/multi-agent-orchestrator/.well-known/acme-challenge/jeton >/dev/null
+          body="$(curl -fsS -H "Host: ${CI_DOMAIN}" \
+            "http://127.0.0.1/.well-known/acme-challenge/jeton")"
+          [[ "$body" == "jeton-de-test" ]]
+          # La racine sert le frontend compilé (HTTP seul dans cette variante).
+          code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${CI_DOMAIN}" http://127.0.0.1/)"
+          echo "code HTTP servi : ${code}"
+          [[ "$code" == "200" ]]
+          # Les chemins sensibles sont refusés.
+          code_sensitive="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${CI_DOMAIN}" \
+            http://127.0.0.1/.env)"
+          echo "code HTTP pour /.env : ${code_sensitive}"
+          [[ "$code_sensitive" == "403" || "$code_sensitive" == "404" ]]
+
+  # ---------------------------------------------------------------------------
+  # 3. Unité systemd
+  # ---------------------------------------------------------------------------
+  systemd-unit:
+    name: Unité systemd (systemd-analyze verify)
+    runs-on: ubuntu-latest
+    needs: deploy-shell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rendu de l'unité
+        run: |
+          set -euo pipefail
+          bash deploy/setup.sh --render-only "$RUNNER_TEMP/render" --domain "$CI_DOMAIN"
+          cat "$RUNNER_TEMP/render/orchestrator.service"
+
+      - name: Vérification des directives de durcissement
+        run: |
+          set -euo pipefail
+          unit="$RUNNER_TEMP/render/orchestrator.service"
+          grep -qx '\[Unit\]' "$unit"
+          grep -qx '\[Service\]' "$unit"
+          grep -qx '\[Install\]' "$unit"
+          grep -q '^User=orchestrator$' "$unit"
+          grep -q '^EnvironmentFile=/etc/multi-agent-orchestrator/production.env$' "$unit"
+          grep -q '^ExecStart=/opt/multi-agent-orchestrator/application/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000$' "$unit"
+          grep -q '^WorkingDirectory=/opt/multi-agent-orchestrator/application/backend$' "$unit"
+          grep -q '^Restart=on-failure$' "$unit"
+          grep -q '^WantedBy=multi-user.target$' "$unit"
+          grep -q '^NoNewPrivileges=true$' "$unit"
+          grep -q '^PrivateTmp=true$' "$unit"
+          grep -q '^ProtectSystem=strict$' "$unit"
+          grep -q '^ProtectHome=true$' "$unit"
+          grep -q '^ReadWritePaths=/var/lib/multi-agent-orchestrator /var/log/multi-agent-orchestrator$' "$unit"
+          echo "Directives de durcissement OK"
+
+      - name: systemd-analyze verify
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/multi-agent-orchestrator/application/backend/.venv/bin \
+                        /etc/multi-agent-orchestrator \
+                        /var/lib/multi-agent-orchestrator /var/log/multi-agent-orchestrator
+          sudo touch /opt/multi-agent-orchestrator/application/backend/.venv/bin/uvicorn \
+                     /etc/multi-agent-orchestrator/production.env
+          sudo chmod +x /opt/multi-agent-orchestrator/application/backend/.venv/bin/uvicorn
+          id -u orchestrator >/dev/null 2>&1 || sudo useradd --system orchestrator
+          sudo install -m 0644 "$RUNNER_TEMP/render/orchestrator.service" \
+            /etc/systemd/system/orchestrator.service
+          sudo systemd-analyze verify /etc/systemd/system/orchestrator.service
+          # Aucune erreur attendue : toute sortie non vide fait échouer l'étape.
+          out="$(sudo systemd-analyze verify /etc/systemd/system/orchestrator.service 2>&1 || true)"
+          if [[ -n "$out" ]]; then
+            echo "$out"
+            echo "systemd-analyze signale des problèmes."; exit 1
+          fi
+          echo "Unité systemd valide"
+
+  # ---------------------------------------------------------------------------
+  # 4. Préservation lors de la désinstallation (arborescence isolée)
+  # ---------------------------------------------------------------------------
+  uninstall-preservation:
+    name: Préservation et annulation partielle
+    runs-on: ubuntu-latest
+    needs: deploy-shell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test de préservation à la désinstallation (aucun chemin système touché)
+        run: |
+          set -euo pipefail
+          TEST_ROOT="$RUNNER_TEMP/mao-preservation" \
+            bash deploy/tests/test-uninstall-preservation.sh
+
+      - name: Test unitaire de l'annulation partielle (setup.sh)
+        run: |
+          set -euo pipefail
+          TEST_ROOT="$RUNNER_TEMP/mao-rollback" \
+            bash deploy/tests/test-setup-rollback.sh
+
+  # ---------------------------------------------------------------------------
+  # 5. Backend : compilation et tests
+  # ---------------------------------------------------------------------------
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Compilation des sources Python (contrôle de syntaxe)
+        run: |
+          set -euo pipefail
+          python -m compileall -q backend/app && echo "Compilation Python OK"
+
+      - name: Dépendances backend
+        run: |
+          set -euo pipefail
+          if [[ -s backend/requirements.txt ]]; then
+            pip install --upgrade pip
+            pip install -r backend/requirements.txt
+            pip install pytest
+          else
+            echo "::notice::backend/requirements.txt absent ou vide : aucune dépendance à installer."
+          fi
+
+      - name: Tests backend (pytest)
+        run: |
+          set -euo pipefail
+          if find backend -name 'test_*.py' -not -path '*/.venv/*' | grep -q .; then
+            python -m pytest -q backend
+          else
+            echo "::notice::Aucun test backend détecté (backend/test_*.py) — étape ignorée."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 6. Frontend : installation et compilation
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Installation et compilation
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          if [[ ! -s package.json ]]; then
+            echo "::notice::frontend/package.json absent ou vide : compilation ignorée."
+            exit 0
+          fi
+          if [[ -f package-lock.json ]]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          if grep -q '"build"[[:space:]]*:' package.json; then
+            npm run build
+            test -f dist/index.html
+            echo "Frontend compilé : frontend/dist/index.html"
+          else
+            echo "::notice::Aucun script « build » déclaré dans package.json."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 7. Recette Docker : validation du fichier Compose
+  # ---------------------------------------------------------------------------
+  compose-config:
+    name: Recette Docker (docker compose config)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validation du fichier docker-compose.yml
+        run: |
+          set -euo pipefail
+          if [[ ! -s docker-compose.yml ]]; then
+            echo "::notice::docker-compose.yml absent ou vide : étape ignorée."
+            exit 0
+          fi
+          # Valeurs de validation uniquement : aucun secret réel en jeu.
+          export SECRET_KEY="cle-de-validation-ci-uniquement-0123456789abcdefghij"
+          export ADMIN_PASSWORD="MotDePasseDeValidationCI123"
+          docker compose config --quiet
+          echo "docker-compose.yml : configuration resolue sans erreur"
+          attendus=(backend web init)
+          resolues="$(docker compose config --services)"
+          for service in "${attendus[@]}"; do
+            grep -qx "$service" <<< "$resolues" || { echo "Service manquant : $service" >&2; exit 1; }
+          done
+          echo "Services presents : ${attendus[*]}"

@@ -1,0 +1,43 @@
+# Environnements virtuels Python
+.venv/
+venv/
+backend/.venv/
+
+# Secrets — jamais dans Git (SECURITY.md §15, ARCHITECTURE.md §11)
+.env
+backend/.env
+production.env
+
+# Base de données locale et artefacts SQLite
+backend/data/
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-error.log*
+
+# Éditeurs et systèmes
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Sauvegardes et fichiers temporaires
+*.bak
+*.orig
+*.rej
+*.log

@@ -1,0 +1,18 @@
+# Multi-Agent Orchestrator — dépendances backend
+# Versions épinglées, alignées sur l'environnement de référence réellement testé
+# (Python 3.11 — SECURITY.md §12 : gestion des dépendances).
+
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+sqlalchemy==2.0.54
+pydantic==2.13.5
+pydantic-settings==2.15.0
+argon2-cffi==25.1.0
+itsdangerous==2.2.0
+slowapi==0.1.10
+python-multipart==0.0.32
+cryptography==50.0.1
+
+# Tests (développement et intégration continue)
+pytest==9.1.1
+httpx==0.28.1
