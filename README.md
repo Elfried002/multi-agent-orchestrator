@@ -244,7 +244,7 @@ Python, Node.js, npm, Nginx, Certbot ni SQLite à l'avance.**
 ### Installation en une commande
 
 ```bash
-git clone <url-du-depot> multi-agent-orchestrator
+git clone https://github.com/Elfried002/multi-agent-orchestrator.git
 cd multi-agent-orchestrator
 sudo bash deploy/setup.sh
 ```
