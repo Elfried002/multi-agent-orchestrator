@@ -76,6 +76,21 @@ with TestClient(app) as client:
     r = client.get("/api/v1/auth/me")
     verifier(r.status_code == 200 and r.json()["username"] == "admin", "GET /auth/me avec session")
 
+    # 5 bis. Précondition : l'orchestrateur doit être en service (ONLINE).
+    # Sans ce contrôle, un orchestrateur hors ligne fait refuser les appels d'agent
+    # en 503 et le parcours échouerait plus loin sur un message peu lisible.
+    etat = client.get("/api/v1/settings/orchestrator")
+    etat_courant = etat.json().get("orchestrator_status") if etat.status_code == 200 else "indéterminé"
+    if etat_courant in (None, ""):
+        etat_courant = "jamais mis en service"
+    if etat_courant != "ONLINE":
+        print(f"  ARRÊT : l'orchestrateur est « {etat_courant} » ; les appels d'agent sont refusés.")
+        print("  Passez-le en service (tableau de bord → Paramètres, ou")
+        print("  POST /api/v1/settings/orchestrator/state avec {\"desired_state\": \"ONLINE\"})")
+        print("  puis relancez ce parcours de vérification.")
+        sys.exit(2)
+    verifier(True, "orchestrateur en service (ONLINE)")
+
     # 6. Enregistrement d'un agent
     r = client.post(
         "/api/v1/agents/enroll",

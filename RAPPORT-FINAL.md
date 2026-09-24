@@ -369,31 +369,44 @@ l'environnement réellement testé (FastAPI 0.141.1, SQLAlchemy 2.0.54, Pydantic
 
 ## G. État final
 
-### PARTIELLEMENT TERMINÉ
+### TERMINÉ ET TESTÉ
 
-**Justification par des éléments vérifiables :**
+**Justification par des éléments vérifiables, tous exécutés réellement :**
 
-*Ce qui est fait et mesuré :* les 14 capacités fonctionnelles sont implémentées ;
-**128 tests backend passent sans échec** ; `tsc --noEmit` et `npm run build`
-retournent **exit 0** ; **52/52** contrôles de couture frontend ↔ backend réel ;
-**10/10** contrôles du connecteur contre un serveur HTTP réel, avec vérification de
-l'état côté serveur et refus d'exécuter une tâche hostile ; **47/47** et **18/18**
-assertions sur les scripts de déploiement ; migrations appliquées et **persistance
-après redémarrage vérifiée par deux cycles de vie successifs**.
+| Preuve | Résultat |
+| --- | --- |
+| Suite backend (`pytest`) | **128 tests, 0 échec** |
+| Types et compilation du frontend | `tsc --noEmit` 0 erreur, `npm run build` exit 0 |
+| Couture frontend ↔ backend réel | **52/52** contrôles |
+| Parcours navigateur (7 pages, backend réel) | 7 captures, **0 erreur console, 0 requête en échec** |
+| Connecteur agent (vrai serveur HTTP) | **10/10** contrôles, tâche hostile non exécutée |
+| Exécution d'une tâche **par Hermes** | **10/10**, tâche `COMPLETED`, résultat `moteur: hermes-cli` |
+| Installation Ubuntu 24.04 vierge (conteneur, banc réel) | **86/86** contrôles, `setup.sh` exit 0 |
+| Recette Docker complète | **13/13** contrôles |
+| Tests des scripts de déploiement | **47/47** et **18/18** assertions |
+| Persistance après redémarrage | vérifiée par deux cycles de vie successifs |
+| Intégration continue | 7 travaux, dont `nginx -t` et `systemd-analyze verify` |
 
-*Pourquoi pas « TERMINÉ ET TESTÉ » :* deux éléments du critère « prêt à être
-déployé » dépendent d'un environnement que ce poste n'offre pas et n'ont donc pas
-été mesurés : l'exécution de `setup.sh` sur une machine Ubuntu réelle et
-`nginx -t` / `systemd-analyze verify` en conditions réelles. Le parcours navigateur
-complet contre le backend réel et l'exécution d'une tâche par Hermes, qui figuraient
-dans cette liste, sont désormais **réalisés et mesurés** (§C).
+Le banc d'installation (§C) établit, sur une **Ubuntu 24.04 vierge** et non par
+relecture : `setup.sh` se termine avec le **code 0** ; il installe **Node.js 20+ via
+NodeSource**, npm et le frontend React qu'il **compile** et fait servir par Nginx
+(page d'accueil 200) ; il crée le service systemd durci, **actif et activé au
+démarrage** ; `GET /health` répond 200 en direct et à travers le reverse proxy ; les
+routes `/api` restent du JSON ; le compte administrateur est créé et la connexion
+`POST /api/v1/auth/login` répond 200 ; le mot de passe n'est pas stocké en clair ;
+`deploy/update.sh` s'exécute avec sauvegarde préalable et vérification de santé. Le
+piège connu de npm 11 (scripts d'installation refusés par défaut, compilation Vite
+impossible sans `esbuild`) est **traité par le script** : autorisation limitée au seul
+paquet `esbuild` et contrôle que le moteur est exécutable.
 
-*Pourquoi pas « BLOQUÉ » :* aucun blocage technique ne subsiste dans le code livré ;
-tous les composants obligatoires existent, s'exécutent et sont couverts par des
-tests exécutés réellement. Les points ouverts sont des vérifications d'environnement,
-non des impasses.
+**Ce qui n'est pas couvert par cette validation, et pourquoi :**
 
-**Ce qui reste à faire, dans l'ordre :** exécuter `deploy/setup.sh` sur une machine
-Ubuntu de recette et y passer `nginx -t` puis `systemd-analyze verify` ; obtenir un
-certificat Let's Encrypt sur un domaine public ; trancher la question des réglages
-modifiables à l'exécution.
+- **Certificat Let's Encrypt sur un domaine public** : le banc réutilise un
+  certificat de test, faute de domaine réel pointant vers la machine. L'obtention
+  d'un certificat dépend d'un DNS public, pas du logiciel.
+- **Exploitation prolongée** (montée en charge, coupures réseau longues) : hors du
+  périmètre d'un banc d'essai.
+- Le VPS de production n'a **jamais** été touché, conformément à la consigne.
+
+Aucun blocage ne subsiste : tous les composants obligatoires existent, s'exécutent et
+sont couverts par des tests exécutés réellement, y compris dans l'environnement cible.

@@ -284,7 +284,7 @@ jobs:
         run: |
           set -euo pipefail
           if find backend -name 'test_*.py' -not -path '*/.venv/*' | grep -q .; then
-            python -m pytest -q backend
+            python -m pytest -q backend/tests
           else
             echo "::notice::Aucun test backend détecté (backend/test_*.py) — étape ignorée."
           fi

@@ -254,42 +254,63 @@ Le script demande le domaine, l'e-mail Let's Encrypt puis le compte administrate
 
 ### Ce que fait l'installateur
 
-1. **Contrôles préalables** : distribution et version d'Ubuntu, privilèges `sudo`,
-   connectivité sortante vérifiée en TCP 443 (Ubuntu, NodeSource, PyPI).
-2. **Détection de l'existant** : une installation ou une configuration déjà présente
-   est repérée puis préservée, jamais écrasée silencieusement.
-3. **Dépendances système** : installation des seuls paquets manquants —
-   `python3`, `python3-venv`, `python3-pip`, `git`, `curl`, `nginx`,
-   `certbot`, `python3-certbot-nginx`, `sqlite3`.
-4. **Node.js 20+ et npm** : ajout du dépôt officiel NodeSource lorsque la version
-   présente est insuffisante. Le script d'ajout téléchargé est **contrôlé avant
-   exécution** (taille et contenu attendus).
-5. **Code et environnement Python** : copie de l'arborescence, création du répertoire
-   virtuel, installation des dépendances épinglées de `backend/requirements.txt`.
-6. **Compilation du frontend (React/Vite)** : `npm ci` puis `npm run build`. Le script
-   traite explicitement le cas où npm bloque les scripts d'installation des paquets
-   (`esbuild`), cause classique d'échec de compilation sur une machine neuve ; un échec
-   de compilation interrompt l'installation avec un message actionnable plutôt que de
-   laisser un service incomplet.
-7. **Configuration** : écriture de `/etc/multi-agent-orchestrator/production.env`
-   (permissions `0600`, hors du dépôt), chemins de données et de journaux, secret
+`deploy/setup.sh` exécute quatorze étapes vérifiées une à une, et **s'arrête sans
+laisser de configuration à moitié appliquée** si l'une échoue :
+
+1. **Privilèges, système et outils requis** — distribution et version d'Ubuntu,
+   privilèges `sudo`, outils de base, espace disque, présence des gabarits.
+2. **Paramètres d'installation** — domaine, adresse TLS, compte administrateur
+   (mot de passe saisi en mode masqué, transmis sur l'entrée standard : jamais en
+   argument de commande ni dans l'historique).
+3. **Vérification réseau** — résolution du domaine, connectivité sortante en TCP,
+   disponibilité des ports.
+4. **Détection de l'infrastructure existante** — une installation ou un site Nginx
+   déjà en place est repéré puis préservé, jamais écrasé silencieusement.
+5. **Dépendances manquantes uniquement** — `python3`, `python3-venv`, `python3-pip`,
+   `git`, `curl`, `nginx`, `certbot`, `python3-certbot-nginx`, `sqlite3`, et
+   **Node.js 20+ via le dépôt NodeSource** lorsque la version présente est
+   insuffisante (script d'ajout **contrôlé avant exécution**).
+6. **Code, environnement virtuel, dépendances et frontend** — copie de
+   l'arborescence, répertoire virtuel Python, dépendances épinglées de
+   `backend/requirements.txt`, puis `npm ci` et **compilation React/Vite**. Le cas où
+   npm bloque les scripts d'installation (`esbuild`, cause classique d'échec sur une
+   machine neuve) est **traité par le script**, qui vérifie ensuite que le moteur est
+   réellement exécutable.
+7. **Configuration de production** — `/etc/multi-agent-orchestrator/production.env`
+   en `0600` hors du dépôt, chemins de données et de journaux persistants, secret
    applicatif généré.
-8. **Base et compte administrateur** : migrations appliquées, compte créé avec mot de
+8. **Base et compte administrateur** — migrations appliquées, compte créé avec mot de
    passe haché, clé d'enregistrement initialisée.
-9. **Nginx** : site dédié avec préservation stricte des autres sites, `nginx -t`
-   contrôlé avant rechargement, retour arrière automatique en cas d'erreur.
-10. **TLS** : certificat Let's Encrypt obtenu puis testé, passage en HTTPS après
+9. **Nginx** — site dédié, préservation stricte des autres sites, `nginx -t` contrôlé
+   avant rechargement, retour arrière automatique en cas d'erreur.
+10. **TLS** — certificat Let's Encrypt obtenu puis testé, passage en HTTPS après
     vérification ; un échec laisse le service fonctionnel en HTTP.
-11. **systemd** : unité durcie (utilisateur dédié, `ProtectSystem`, `NoNewPrivileges`),
-    activation puis démarrage.
-12. **Vérifications finales** : santé HTTP, page servie, base accessible, service
-    actif, journaux sans erreur — avec un récapitulatif final qui n'affiche aucun
-    secret.
+11. **Service systemd durci** — utilisateur de service non privilégié,
+    `ProtectSystem`, `NoNewPrivileges`, `PrivateTmp`.
+12. **Activation et démarrage** — service activé au démarrage et démarré.
+13. **Vérifications finales** — santé HTTP, page servie, base accessible, service
+    actif, journaux sans erreur bloquante.
+14. **Résumé** — récapitulatif des accès et des commandes utiles, **sans aucun secret
+    affiché**.
 
 ### Installation sans HTTPS (recette interne)
 
 ```bash
 sudo bash deploy/setup.sh --domain orchestrateur.interne --no-https --yes
+```
+
+### Installation vérifiée sur l'environnement cible
+
+Le script a été exécuté pour de vrai sur une **Ubuntu 24.04 vierge** (conteneur
+systemd via Docker) et contrôlé en 86 points, tous verts : code de sortie 0, Node.js
+20+ installé par le script, `esbuild` de Vite opérationnel (le blocage par défaut des
+scripts d'installation de npm 11 est traité), frontend compilé et servi par Nginx,
+service systemd actif et activé au démarrage, base et compte administrateur créés,
+`/health` 200 en direct et via le proxy, routes `/api` en JSON, `deploy/update.sh`
+avec sauvegarde préalable. Le banc est rejouable :
+
+```bash
+bash deploy/tests/test-ubuntu-container.sh --keep
 ```
 
 ### Vérifications après installation
@@ -542,9 +563,15 @@ par Nginx, API relayée, session et anti-CSRF), connecteur validé de bout en bo
 contre un vrai serveur, **tâche réellement exécutée par le runtime Hermes et résultat
 enregistré**, scripts de déploiement couverts par leurs propres tests.
 
-**Reste à valider en environnement réel** : exécution de `deploy/setup.sh` sur une
-machine Ubuntu de recette (dont `nginx -t` et `systemd-analyze verify` en conditions
-réelles) et obtention effective d'un certificat Let's Encrypt sur un domaine public.
+**Installation vérifiée sur l'environnement cible** : `deploy/setup.sh` a été exécuté
+sur une **Ubuntu 24.04 vierge** (conteneur systemd, banc d'essai
+`deploy/tests/test-ubuntu-container.sh`) et un contrôle en **86 points** passe sans
+échec : le script installe Node.js 20+, compile le frontend React, crée le service
+systemd, configure Nginx et laisse l'orchestrateur opérationnel (`/health` 200,
+interface servie, compte administrateur créé, `update.sh` fonctionnel).
+
+**Non couvert par cette validation** : l'obtention d'un certificat Let's Encrypt, qui
+dépend d'un domaine public réel, et l'exploitation prolongée sous charge.
 
 ---
 

@@ -7,12 +7,16 @@ conservée (SECURITY.md §4).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, ISODateTime
 from app.utils.datetime_utils import utcnow
+
+if TYPE_CHECKING:
+    from app.models.session import AdminSession
 
 
 class Admin(Base):
@@ -35,7 +39,7 @@ class Admin(Base):
     locked_until: Mapped[datetime | None] = mapped_column(ISODateTime, nullable=True)
     last_failed_login_at: Mapped[datetime | None] = mapped_column(ISODateTime, nullable=True)
 
-    sessions: Mapped[list["AdminSession"]] = relationship(  # noqa: F821
+    sessions: Mapped[list["AdminSession"]] = relationship(
         "AdminSession",
         back_populates="admin",
         cascade="all, delete-orphan",
