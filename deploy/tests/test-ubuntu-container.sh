@@ -698,8 +698,10 @@ phase_node_permissions() {
         'chmod 0700 /usr/local/bin/npm /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm/bin'
     log_detail "$(docker exec "$c2" bash -c 'stat -c "%a %n" /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm/bin; ls -l /usr/local/bin/npm | cut -c1-90' | tr '\n' ' ')"
 
+    # La chaîne de test reproduit l'appel réel de setup.sh (runuser -> env ->
+    # binaire) : c'est elle qui produit « Permission denied » et le code 126.
     check_remote "défaut reproduit : npm refusé à un utilisateur non privilégié (code 126)" '^code=126$' \
-        bash -c 'runuser -u nobody -- /usr/local/bin/npm --version >/dev/null 2>&1; echo "code=$?"'
+        bash -c 'runuser -u nobody -- env HOME=/tmp PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/npm --version >/dev/null 2>&1; echo "code=$?"'
 
     local rc2=0
     run_setup "$log2" "Exécution de setup.sh avec Node.js/npm préexistants non exécutables…" || rc2=$?
