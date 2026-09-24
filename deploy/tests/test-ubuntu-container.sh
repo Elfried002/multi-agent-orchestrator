@@ -318,7 +318,7 @@ start_container() {
 #  4. Copie du projet (frontend/dist et node_modules EXCLUS)
 # ---------------------------------------------------------------------------
 copy_project() {
-    log_step "Copie du projet dans /project (frontend/dist et node_modules exclus)"
+    log_step "Copie du projet dans /project (frontend/dist, node_modules et bases locales exclus)"
     docker exec "$CONTAINER" mkdir -p /project
     (
         cd -- "$REPO_ROOT" || exit 1
@@ -332,6 +332,10 @@ copy_project() {
             --exclude='./frontend/dist' \
             --exclude='*/.env' \
             --exclude='./.pytest_cache' \
+            --exclude='./backend/data' \
+            --exclude='*.db' \
+            --exclude='*.db-wal' \
+            --exclude='*.db-shm' \
             .
     ) | docker exec -i "$CONTAINER" tar -C /project -xf -
     local size files
@@ -342,6 +346,13 @@ copy_project() {
         die "frontend/dist a été copié : le banc d'essai ne prouverait pas la compilation par setup.sh."
     fi
     log_info "Contrôle préalable : aucun frontend/dist dans les sources copiées."
+    # Les bases d'exécution locales (backend/data/*.db, artefacts gitignorés) ne
+    # doivent jamais entrer dans le conteneur : le démarrage doit être réellement
+    # à froid, comme sur un serveur neuf.
+    if docker exec "$CONTAINER" bash -c 'test -n "$(find /project -name "*.db*" -print -quit 2>/dev/null)"'; then
+        die "des bases de données (*.db) ont été copiées : le démarrage à froid serait faussé."
+    fi
+    log_info "Contrôle préalable : aucune base de données locale (*.db) dans les sources copiées."
 }
 
 # ---------------------------------------------------------------------------
